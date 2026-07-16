@@ -80,7 +80,9 @@ if ( "$arg" == '-a' || "$arg" == '-aa' ) then
     /bin/rm -f configure.wrf.backup
     /bin/rm -f Registry/Registry.backup
     /bin/rm -f run/namelist.input.backup.*
-    /bin/rm -fr phys/noahmp
+    /bin/rm -f run/namelist.input
+    # Keep the submodule checkout — the first loop cleans build artifacts inside it.
+    # Just remove the submodule symlinks and generated data files that live outside it.
     /bin/rm -f run/NoahmpTable.TBL run/snicar_*.nc
     /bin/rm -f phys/module_bl_mynnedmf.F phys/module_bl_mynnedmf_common.F \
                phys/module_bl_mynnedmf_driver.F
@@ -88,6 +90,32 @@ if ( "$arg" == '-a' || "$arg" == '-aa' ) then
                phys/module_mp_tempo_utils.F90 phys/module_mp_tempo_diags.F90 \
                phys/module_mp_tempo_ml.F90 phys/module_mp_tempo_driver.F90 \
                phys/module_mp_tempo_aerosols.F90 phys/module_mp_tempo_main.F90
+    /bin/rm -f phys/module_cu_gfl_wrf.F phys/module_cu_gfl_common.F \
+               phys/module_cu_gfl_deep.F phys/module_cu_gfl_sh.F
+    /bin/rm -f phys/module_sf_mynnsfc_driver.F phys/module_sf_mynnsfc_common.F \
+               phys/module_sf_mynnsfc_land.F phys/module_sf_mynnsfc_water.F \
+               phys/module_sf_mynnsfc_ice.F
+    # -aa also cleans the test/ build artifacts that -a covers
+    ( cd test ; /bin/rm -f */*.exe */ETAMPNEW_DATA* */GENPARM.TBL */LANDUSE.TBL */README.namelist */README.physics_files \
+          */RRTM_DATA */SOILPARM.TBL */VEGPARM.TBL */NoahmpTable.TBL */URBPARM.TBL */URBPARM_LCZ.TBL */grib2map.tbl \
+          */CAM_ABS_DATA */CAM_AEROPT_DATA */snicar_*.nc \
+          */CCN_ACTIVATE.BIN */STOCHPERT.TBL \
+          */CAMtr_volume_mixing_ratio.RCP4.5 */CAMtr_volume_mixing_ratio.RCP6 */CAMtr_volume_mixing_ratio.RCP8.5 \
+          */CAMtr_volume_mixing_ratio.A1B */CAMtr_volume_mixing_ratio.A2 */CAMtr_volume_mixing_ratio \
+          */CAMtr_volume_mixing_ratio.SSP119 */CAMtr_volume_mixing_ratio.SSP126 \
+          */CAMtr_volume_mixing_ratio.SSP245 */CAMtr_volume_mixing_ratio.SSP370 \
+          */CAMtr_volume_mixing_ratio.SSP585 \
+          */CLM_*DATA */RRTMG_LW_DATA */RRTMG_SW_DATA \
+          */p3_lookup* */BROADBAND_CLOUD_GODDARD.bin \
+          */ozone.formatted */ozone_lat.formatted */ozone_plev.formatted \
+          */aerosol.formatted */aerosol_lat.formatted */aerosol_plev.formatted */aerosol_lon.formatted \
+          */kernels.asc_s_0_03_0_9 */bulkradii.asc_s_0_03_0_9 */bulkdens.asc_s_0_03_0_9 \
+          */constants.asc \
+          */masses.asc */kernels_z.asc */capacity.asc */termvels.asc */coeff_p.asc */coeff_q.asc \
+          */gribmap.txt */tr??t?? */co2_trans */namelist.output */ishmael-gamma-tab.bin \
+          */eclipse_besselian_elements.dat \
+          */HLC.TBL */wind-turbine-1.tbl \
+          */ishmael-qi-qc.bin */ishmael-qi-qr.bin ) >& /dev/null
   endif
 endif
 

@@ -10,6 +10,9 @@ $wrf_cmaq_option =  $ENV{'WRF_CMAQ'};     # determine building WRF-CMAQ coupled 
 
 select((select(STDOUT), $|=1)[0]);
 $sw_perl_path = perl ;
+$sw_cuda_path = $ENV{'WRF_CUDA_PATH'} || "" ;
+$sw_nvcc_ccbin = $ENV{'WRF_NVCC_CCBIN'} || `which g++` ;
+chomp( $sw_nvcc_ccbin ) ;
 $sw_netcdf_path = "" ;
 $sw_pnetcdf_path = "" ;
 $sw_netcdfpar_path = "" ;
@@ -634,6 +637,8 @@ while ( <CONFIGURE_DEFAULTS> )
   if ( $latchon == 1 )
   {
     $_ =~ s/CONFIGURE_PERL_PATH/$sw_perl_path/g ;
+    $_ =~ s/CONFIGURE_CUDA_PATH/$sw_cuda_path/g ;
+    $_ =~ s/CONFIGURE_NVCC_CCBIN/$sw_nvcc_ccbin/g ;
     $_ =~ s/CONFIGURE_NETCDF_PATH/$sw_netcdf_path/g ;
     $_ =~ s/CONFIGURE_PNETCDF_PATH/$sw_pnetcdf_path/g ;
     $_ =~ s/CONFIGURE_NETCDFPAR_PATH/$sw_netcdfpar_path/g ;

@@ -234,3 +234,6 @@ setfeenv.o : setfeenv.c
 	$(RM) $@
 	$(CC) -o $@ -c $(CFLAGS) $*.c
 
+.cu.o:
+	$(RM) $@
+	$(NVCC) $(NVCCFLAGS) -c $*.cu
