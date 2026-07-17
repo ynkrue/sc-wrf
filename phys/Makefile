@@ -132,6 +132,7 @@ MODULES = \
         module_ra_effective_radius.o \
 	module_ra_rrtm.o  \
 	module_ra_rrtmg_lw.o  \
+	module_ra_rrtmg_lw_gpu.o \
 	module_ra_rrtmg_sw.o  \
 	module_ra_rrtmg_aero_optical_util_cmaq.o \
 	module_ra_rrtmg_lwf.o  \

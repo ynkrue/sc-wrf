@@ -2346,12 +2346,13 @@ module_ra_rrtmg_swk.o: \
 	module_ra_rrtmg_lwk.o \
 	module_ra_effective_radius.o 
 
-
 module_ra_rrtmg_lw.o: \
 	../frame/module_wrf_error.o \
 	../share/module_model_constants.o \
 	module_ra_clWRF_support.o 
 
+module_ra_rrtmg_lw_gpu.o: \
+	module_ra_rrtmg_lw.o 
 
 module_ra_rrtmg_lwf.o: \
 	../frame/module_wrf_error.o \
@@ -2665,6 +2666,7 @@ module_radiation_driver.o: \
 	module_ra_gsfcsw.o \
 	module_ra_rrtm.o \
 	module_ra_rrtmg_lw.o \
+	module_ra_rrtmg_lw_gpu.o \
 	module_ra_rrtmg_sw.o \
 	module_ra_rrtmg_aero_optical_util_cmaq.o \
 	module_ra_rrtmg_lwf.o \

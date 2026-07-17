@@ -2343,7 +2343,7 @@ CC_TOOLS        =      $(SCC)
 NVCC            =       $(CUDA_PATH)/bin/nvcc
 NVCCFLAGS       =       -arch=sm_90 -O3 -ccbin CONFIGURE_NVCC_CCBIN
 CUDA_PATH       =       CONFIGURE_CUDA_PATH
-LIB_LOCAL       =       -L$(CUDA_PATH)/lib64 -lcudart -lstdc++
+LIB_LOCAL       =       -L$(CUDA_PATH)/lib64 -Wl,-rpath,$(CUDA_PATH)/lib64 -lcudart -lstdc++
 
 
 ###########################################################

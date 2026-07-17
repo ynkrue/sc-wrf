@@ -294,6 +294,9 @@ CONTAINS
    USE module_ra_gsfcsw     , ONLY : gsfcswrad
    USE module_ra_rrtm       , ONLY : rrtmlwrad
    USE module_ra_rrtmg_lw   , ONLY : rrtmg_lwrad, rrtmg_lwinit
+#ifdef WRF_GPU
+   USE module_ra_rrtmg_lw_gpu, ONLY : RRTMG_LWRAD_GPU
+#endif
    USE module_ra_rrtmg_sw   , ONLY : rrtmg_swrad
 #if( BUILD_RRTMG_FAST == 1)
    USE module_ra_rrtmg_lwf  , ONLY : rrtmg_lwrad_fast
@@ -2044,7 +2047,61 @@ CONTAINS
                               ims, ime, jms, jme, kms, kme,    &
                               its, ite, jts, jte, kts, kte     )
              ENDIF
+#ifdef WRF_GPU
+             CALL RRTMG_LWRAD_GPU(                                      &
+                  RTHRATENLW=RTHRATEN,                              &
+                  RTHRATENLWC=RTHRATENLWC,                          &
+                  LWUPT=LWUPT,LWUPTC=LWUPTC,LWUPTCLN=LWUPTCLN,      &
+                  LWDNT=LWDNT,LWDNTC=LWDNTC,LWDNTCLN=LWDNTCLN,      &
+                  LWUPB=LWUPB,LWUPBC=LWUPBC,LWUPBCLN=LWUPBCLN,      &
+                  LWDNB=LWDNB,LWDNBC=LWDNBC,LWDNBCLN=LWDNBCLN,      &
+                  GLW=GLW,OLR=RLWTOA,LWCF=LWCF,                     &
+                  EMISS=EMISS,                                      &
+                  P8W=p8w,P3D=p,PI3D=pi,DZ8W=dz8w,TSK=tsk,T3D=t,    &
+                  T8W=t8w,RHO3D=rho,R=R_d,G=G,                      &
+                  ICLOUD=icloud,WARM_RAIN=warm_rain,CLDFRA3D=CLDFRA,&
+                  cldovrlp=cldovrlp,idcor=idcor,XLAT=XLAT,          &
+#if (EM_CORE == 1)
+                  LRADIUS=lradius, IRADIUS=iradius,                 &
+#endif
+                  IS_CAMMGMP_USED=is_cammgmp_used,                  &
 
+!ckay
+!                 CLDFRA_KF3D=cldfra_KF,QC_KF3D=qc_KF,QI_KF3D=qi_KF,&
+                  F_ICE_PHY=F_ICE_PHY,F_RAIN_PHY=F_RAIN_PHY,        &
+                  XLAND=XLAND,XICE=XICE,SNOW=SNOW,                  &
+                  QV3D=QV,QC3D=QC,QR3D=QR,                          &
+                  QI3D=QI,QS3D=QS,QG3D=QG,                          &
+                  O3INPUT=O3INPUT,O33D=O3RAD,                       &
+                  F_QV=F_QV,F_QC=F_QC,F_QR=F_QR,                    &
+                  F_QI=F_QI,F_QS=F_QS,F_QG=F_QG,                    &
+                  RE_CLOUD=re_cloud,RE_ICE=re_ice,RE_SNOW=re_snow,  & ! G. Thompson
+                  has_reqc=has_reqc,has_reqi=has_reqi,has_reqs=has_reqs, & ! G. Thompson
+#if ( WRF_CHEM == 1 )
+                  TAUAERLW1=tauaerlw1,TAUAERLW2=tauaerlw2,          & ! jcb
+                  TAUAERLW3=tauaerlw3,TAUAERLW4=tauaerlw4,          & ! jcb
+                  TAUAERLW5=tauaerlw5,TAUAERLW6=tauaerlw6,          & ! jcb
+                  TAUAERLW7=tauaerlw7,TAUAERLW8=tauaerlw8,          & ! jcb
+                  TAUAERLW9=tauaerlw9,TAUAERLW10=tauaerlw10,        & ! jcb
+                  TAUAERLW11=tauaerlw11,TAUAERLW12=tauaerlw12,      & ! jcb
+                  TAUAERLW13=tauaerlw13,TAUAERLW14=tauaerlw14,      & ! jcb
+                  TAUAERLW15=tauaerlw15,TAUAERLW16=tauaerlw16,      & ! jcb
+                  aer_ra_feedback=aer_ra_feedback,                  &
+!jdfcz            progn=progn,prescribe=prescribe,                   &
+                  progn=progn,                                      &
+#endif
+                  calc_clean_atm_diag=calc_clean_atm_diag,          &
+                  QNDROP3D=qndrop,F_QNDROP=f_qndrop,                &
+!ccc Added for time-varying trace gases.
+                  YR=YR,JULIAN=JULIAN,GHG_INPUT=GHG_INPUT,          &
+!ccc
+                  IDS=ids,IDE=ide, JDS=jds,JDE=jde, KDS=kds,KDE=kde,&
+                  IMS=ims,IME=ime, JMS=jms,JME=jme, KMS=kms,KME=kme,&
+                  ITS=its,ITE=ite, JTS=jts,JTE=jte, KTS=kts,KTE=kte,&
+                  LWUPFLX=LWUPFLX,LWUPFLXC=LWUPFLXC,                &
+                  LWDNFLX=LWDNFLX,LWDNFLXC=LWDNFLXC,                &
+                  mp_physics=mp_physics                             )
+#else
              CALL RRTMG_LWRAD(                                      &
                   RTHRATENLW=RTHRATEN,                              &
                   RTHRATENLWC=RTHRATENLWC,                          &
@@ -2098,7 +2155,7 @@ CONTAINS
                   LWUPFLX=LWUPFLX,LWUPFLXC=LWUPFLXC,                &
                   LWDNFLX=LWDNFLX,LWDNFLXC=LWDNFLXC,                &
                   mp_physics=mp_physics                             )
-
+#endif
 
 #if( BUILD_RRTMK == 1)
         CASE (RRTMK_LWSCHEME)
