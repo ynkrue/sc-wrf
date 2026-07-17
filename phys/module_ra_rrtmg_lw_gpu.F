@@ -1316,7 +1316,12 @@ CONTAINS
          resnmcl_p (bcol, :) = resnmcl(1, :)
          tauaer_p  (bcol, :, :) = tauaer(1, :, :)
 
-! Call RRTMG longwave radiation model
+      end do pack_loop
+
+! gpu: solve phase - one single GPU launch over the batch (TODO)
+      solve_loop: do bcol = 1, nbatch
+
+! Call RRTMG longwave radiation model (into packed arrays)
          call rrtmg_lw &
             (ncol    ,nlay    ,icld    , &
              play_p(bcol:bcol,:)     ,plev_p(bcol:bcol,:)     , &
@@ -1342,7 +1347,14 @@ CONTAINS
              uflxcln_p(bcol:bcol,:)  ,dflxcln_p(bcol:bcol,:)  , &
              calc_clean_atm_diag )
 
-! Output downard surface flux, and outgoing longwave flux and cloud forcing 
+      end do solve_loop
+
+! gpu: unpack phase - scatter the batch outputs into the WRF arrays
+      unpack_loop: do bcol = 1, nbatch
+         i = i_of(bcol)
+         j = j_of(bcol)
+
+! Output downard surface flux, and outgoing longwave flux and cloud forcing
 ! at the top of atmosphere (W/m2)
          glw(i,j) = dflx_p(bcol,1)
 !         olr(i,j) = uflx(1,kte+2)
@@ -1395,7 +1407,7 @@ CONTAINS
          enddo
 
 !
-      end do pack_loop
+      end do unpack_loop
    end do batch_loop
    
 ! gpu: free the solver batch
