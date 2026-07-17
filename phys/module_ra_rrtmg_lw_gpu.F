@@ -390,9 +390,27 @@ CONTAINS
                   266.13,263.96,261.54,258.93,256.15,253.23,      &
                   249.89,246.67,243.48,240.25,236.66,233.86/    
 
-! gpu: local vars
-   INTEGER :: nx, ny, npack, icol
-   REAL, ALLOCATABLE :: play_p(:,:)
+! gpu: batching parameters
+   INTEGER, PARAMETER :: batch_size = 512  ! max columns per solver batch (= GPU launch width)
+   INTEGER :: nx, ny, ncols, batch_start, nbatch, bcol
+   INTEGER :: i_of(batch_size), j_of(batch_size)      ! bcol -> (i,j) mapping for batching
+! gpu: batched rrtmg_lw inputs
+   REAL, ALLOCATABLE, DIMENSION(:,:)   :: play_p, tlay_p,                       & ! (batch, nlay)
+                                          plev_p, tlev_p,                       & ! (batch, nlay+1)
+                                          h2ovmr_p, o3vmr_p, co2vmr_p,          & ! (batch, nlay)
+                                          o2vmr_p, ch4vmr_p, n2ovmr_p,          &
+                                          cfc11vmr_p, cfc12vmr_p,               &
+                                          cfc22vmr_p, ccl4vmr_p,                &
+                                          reicmcl_p, relqmcl_p, resnmcl_p,      & ! (batch, nlay)
+                                          emis_p                                  ! (batch, nbndlw)
+   REAL, ALLOCATABLE, DIMENSION(:)     :: tsfc_p                                  ! (batch)
+   REAL, ALLOCATABLE, DIMENSION(:,:,:) :: cldfmcl_p, taucmcl_p, ciwpmcl_p,      & ! (ngptlw, batch, nlay) - ncol is the MIDDLE dim
+                                          clwpmcl_p, cswpmcl_p,                 &
+                                          tauaer_p                                ! (batch, nlay, nbndlw)
+! gpu: batched rrtmg_lw outputs
+   REAL, ALLOCATABLE, DIMENSION(:,:)   :: uflx_p, dflx_p, uflxc_p, dflxc_p,     & ! (batch, nlay+1)
+                                          uflxcln_p, dflxcln_p,                 &
+                                          hr_p, hrc_p                             ! (batch, nlay)
 !------------------------------------------------------------------
 #if ( WRF_CHEM == 1 )
       IF ( aer_ra_feedback == 1) then
@@ -447,17 +465,54 @@ CONTAINS
       cfc12 = 0.538e-9
    END IF
 
-! gpu: alloc packed batch for this tile
+! gpu: allocate the solver batch (on the heap)
    nx = ite - its + 1
    ny = jte - jts + 1
-   npack = nx * ny
-   ALLOCATE( play_p(npack, kts:nlayers) )
+   ALLOCATE( play_p (batch_size, kts:nlayers),                                 &
+             tlay_p (batch_size, kts:nlayers),                                 &
+             plev_p (batch_size, kts:nlayers+1),                               &
+             tlev_p (batch_size, kts:nlayers+1),                               &
+             tsfc_p (batch_size),                                              &
+             h2ovmr_p  (batch_size, kts:nlayers),                              &
+             o3vmr_p   (batch_size, kts:nlayers),                              &
+             co2vmr_p  (batch_size, kts:nlayers),                              &
+             o2vmr_p   (batch_size, kts:nlayers),                              &
+             ch4vmr_p  (batch_size, kts:nlayers),                              &
+             n2ovmr_p  (batch_size, kts:nlayers),                              &
+             cfc11vmr_p(batch_size, kts:nlayers),                              &
+             cfc12vmr_p(batch_size, kts:nlayers),                              &
+             cfc22vmr_p(batch_size, kts:nlayers),                              &
+             ccl4vmr_p (batch_size, kts:nlayers),                              &
+             emis_p    (batch_size, nbndlw),                                   &
+             cldfmcl_p (ngptlw, batch_size, kts:nlayers),                      &
+             taucmcl_p (ngptlw, batch_size, kts:nlayers),                      &
+             ciwpmcl_p (ngptlw, batch_size, kts:nlayers),                      &
+             clwpmcl_p (ngptlw, batch_size, kts:nlayers),                      &
+             cswpmcl_p (ngptlw, batch_size, kts:nlayers),                      &
+             reicmcl_p (batch_size, kts:nlayers),                              &
+             relqmcl_p (batch_size, kts:nlayers),                              &
+             resnmcl_p (batch_size, kts:nlayers),                              &
+             tauaer_p  (batch_size, kts:nlayers, nbndlw) )
+   ALLOCATE( uflx_p   (batch_size, kts:nlayers+1),                             &
+             dflx_p   (batch_size, kts:nlayers+1),                             &
+             uflxc_p  (batch_size, kts:nlayers+1),                             &
+             dflxc_p  (batch_size, kts:nlayers+1),                             &
+             uflxcln_p(batch_size, kts:nlayers+1),                             &
+             dflxcln_p(batch_size, kts:nlayers+1),                             &
+             hr_p     (batch_size, kts:nlayers),                               &
+             hrc_p    (batch_size, kts:nlayers) )
 
-! latitude loop
-  j_loop: do j = jts,jte
+! gpu: process tile in batches of columns
+   ncols = nx * ny
+   batch_loop: do batch_start = 0, ncols-1, batch_size
+      nbatch = min( batch_size, ncols - batch_start )
+! gpu: pack buffers
+      pack_loop: do bcol = 1, nbatch
 
-! longitude loop
-     i_loop: do i = its,ite
+         i = its + mod( batch_start + bcol - 1, nx )
+         j = jts + ( batch_start + bcol - 1 ) / nx
+         i_of(bcol) = i
+         j_of(bcol) = j
 
          do k=kts,kte+1
             Pw1D(K) = p8w(I,K,J)/100.
@@ -1234,51 +1289,88 @@ CONTAINS
       endif  ! aer_ra_feedback
 #endif
 
+! gpu: pack this column's solver inputs into the batch
+         play_p (bcol, :) = play (1, :)
+         tlay_p (bcol, :) = tlay (1, :)
+         plev_p (bcol, :) = plev (1, :)
+         tlev_p (bcol, :) = tlev (1, :)
+         tsfc_p (bcol)    = tsfc (1)
+         h2ovmr_p  (bcol, :) = h2ovmr  (1, :)
+         o3vmr_p   (bcol, :) = o3vmr   (1, :)
+         co2vmr_p  (bcol, :) = co2vmr  (1, :)
+         o2vmr_p   (bcol, :) = o2vmr   (1, :)
+         ch4vmr_p  (bcol, :) = ch4vmr  (1, :)
+         n2ovmr_p  (bcol, :) = n2ovmr  (1, :)
+         cfc11vmr_p(bcol, :) = cfc11vmr(1, :)
+         cfc12vmr_p(bcol, :) = cfc12vmr(1, :)
+         cfc22vmr_p(bcol, :) = cfc22vmr(1, :)
+         ccl4vmr_p (bcol, :) = ccl4vmr (1, :)
+         emis_p    (bcol, :) = emis    (1, :)
+         cldfmcl_p (:, bcol, :) = cldfmcl(:, 1, :)   ! ncol is the middle dim here
+         taucmcl_p (:, bcol, :) = taucmcl(:, 1, :)
+         ciwpmcl_p (:, bcol, :) = ciwpmcl(:, 1, :)
+         clwpmcl_p (:, bcol, :) = clwpmcl(:, 1, :)
+         cswpmcl_p (:, bcol, :) = cswpmcl(:, 1, :)
+         reicmcl_p (bcol, :) = reicmcl(1, :)
+         relqmcl_p (bcol, :) = relqmcl(1, :)
+         resnmcl_p (bcol, :) = resnmcl(1, :)
+         tauaer_p  (bcol, :, :) = tauaer(1, :, :)
+
 ! Call RRTMG longwave radiation model
          call rrtmg_lw &
             (ncol    ,nlay    ,icld    , &
-             play    ,plev    ,tlay    ,tlev    ,tsfc    , & 
-             h2ovmr  ,o3vmr   ,co2vmr  ,ch4vmr  ,n2ovmr  ,o2vmr , &
-             cfc11vmr,cfc12vmr,cfc22vmr,ccl4vmr ,emis    , &
-             inflglw ,iceflglw,liqflglw,cldfmcl , &
-             taucmcl ,ciwpmcl ,clwpmcl ,cswpmcl, reicmcl ,relqmcl ,resnmcl , &
-             tauaer  , &
-             uflx    ,dflx    ,hr      ,uflxc   ,dflxc,  hrc, &
-             uflxcln ,dflxcln, calc_clean_atm_diag )
-
-! gpu: stash column into batch
-         icol = (j - jts) * nx + (i - its) + 1
-         play_p(icol, :) = play(1, :)
+             play_p(bcol:bcol,:)     ,plev_p(bcol:bcol,:)     , &
+             tlay_p(bcol:bcol,:)     ,tlev_p(bcol:bcol,:)     , &
+             tsfc_p(bcol:bcol)       , &
+             h2ovmr_p(bcol:bcol,:)   ,o3vmr_p(bcol:bcol,:)    , &
+             co2vmr_p(bcol:bcol,:)   ,ch4vmr_p(bcol:bcol,:)   , &
+             n2ovmr_p(bcol:bcol,:)   ,o2vmr_p(bcol:bcol,:)    , &
+             cfc11vmr_p(bcol:bcol,:) ,cfc12vmr_p(bcol:bcol,:) , &
+             cfc22vmr_p(bcol:bcol,:) ,ccl4vmr_p(bcol:bcol,:)  , &
+             emis_p(bcol:bcol,:)     , &
+             inflglw ,iceflglw,liqflglw, &
+             cldfmcl_p(:,bcol:bcol,:) , &
+             taucmcl_p(:,bcol:bcol,:) ,ciwpmcl_p(:,bcol:bcol,:) , &
+             clwpmcl_p(:,bcol:bcol,:) ,cswpmcl_p(:,bcol:bcol,:) , &
+             reicmcl_p(bcol:bcol,:)  ,relqmcl_p(bcol:bcol,:)  , &
+             resnmcl_p(bcol:bcol,:)  , &
+             tauaer_p(bcol:bcol,:,:) , &
+             uflx_p(bcol:bcol,:)     ,dflx_p(bcol:bcol,:)     , &
+             hr_p(bcol:bcol,:)       , &
+             uflxc_p(bcol:bcol,:)    ,dflxc_p(bcol:bcol,:)    , &
+             hrc_p(bcol:bcol,:)      , &
+             uflxcln_p(bcol:bcol,:)  ,dflxcln_p(bcol:bcol,:)  , &
+             calc_clean_atm_diag )
 
 ! Output downard surface flux, and outgoing longwave flux and cloud forcing 
 ! at the top of atmosphere (W/m2)
-         glw(i,j) = dflx(1,1)
+         glw(i,j) = dflx_p(bcol,1)
 !         olr(i,j) = uflx(1,kte+2)
 !         lwcf(i,j) = uflxc(1,kte+2) - uflx(1,kte+2)
 ! Steven Cavallo: Changed OLR to be valid at the top of atmosphere instead 
 ! of top of model.  Dec 2010.
-         olr(i,j) = uflx(1,nlayers+1)
-         lwcf(i,j) = uflxc(1,nlayers+1) - uflx(1,nlayers+1)
+         olr(i,j) = uflx_p(bcol,nlayers+1)
+         lwcf(i,j) = uflxc_p(bcol,nlayers+1) - uflx_p(bcol,nlayers+1)
 
          if (present(lwupt)) then 
 ! Output up and down toa fluxes for total and clear sky
 ! nlayers+1 represents value at 0 mb
-            lwupt(i,j)     = uflx(1,nlayers+1)
-            lwuptc(i,j)    = uflxc(1,nlayers+1)
-            lwdnt(i,j)     = dflx(1,nlayers+1)
-            lwdntc(i,j)    = dflxc(1,nlayers+1)
+            lwupt(i,j)     = uflx_p(bcol,nlayers+1)
+            lwuptc(i,j)    = uflxc_p(bcol,nlayers+1)
+            lwdnt(i,j)     = dflx_p(bcol,nlayers+1)
+            lwdntc(i,j)    = dflxc_p(bcol,nlayers+1)
 ! Output up and down surface fluxes for total and clear sky
-            lwupb(i,j)     = uflx(1,1)
-            lwupbc(i,j)    = uflxc(1,1)
-            lwdnb(i,j)     = dflx(1,1)
-            lwdnbc(i,j)    = dflxc(1,1)
+            lwupb(i,j)     = uflx_p(bcol,1)
+            lwupbc(i,j)    = uflxc_p(bcol,1)
+            lwdnb(i,j)     = dflx_p(bcol,1)
+            lwdnbc(i,j)    = dflxc_p(bcol,1)
 			if(calc_clean_atm_diag .gt. 0)then
 ! Output up and down toa fluxes for clean sky
-            	lwuptcln(i,j)  = uflxcln(1,nlayers+1)
-            	lwdntcln(i,j)  = dflxcln(1,nlayers+1)
+            	lwuptcln(i,j)  = uflxcln_p(bcol,nlayers+1)
+            	lwdntcln(i,j)  = dflxcln_p(bcol,nlayers+1)
 ! Output up and down surface fluxes for clean sky
-            	lwupbcln(i,j)  = uflxcln(1,1)
-            	lwdnbcln(i,j)  = dflxcln(1,1)
+            	lwupbcln(i,j)  = uflxcln_p(bcol,1)
+            	lwdnbcln(i,j)  = dflxcln_p(bcol,1)
 			end if
          endif
 
@@ -1286,28 +1378,34 @@ CONTAINS
 ! Vertical ordering is from bottom to top in units of W m-2. 
          if ( present (lwupflx) ) then
          do k=kts,kte+2
-            lwupflx(i,k,j)  = uflx(1,k)
-            lwupflxc(i,k,j) = uflxc(1,k)
-            lwdnflx(i,k,j)  = dflx(1,k)
-            lwdnflxc(i,k,j) = dflxc(1,k)
+            lwupflx(i,k,j)  = uflx_p(bcol,k)
+            lwupflxc(i,k,j) = uflxc_p(bcol,k)
+            lwdnflx(i,k,j)  = dflx_p(bcol,k)
+            lwdnflxc(i,k,j) = dflxc_p(bcol,k)
          enddo
          endif
 
 ! Output heating rate tendency; convert heating rate from K/d to K/s
 ! Heating rate arrays are ordered vertically from bottom to top here. 
          do k=kts,kte
-            tten1d(k) = hr(ncol,k)/86400.
+            tten1d(k) = hr_p(bcol,k)/86400.
             rthratenlw(i,k,j) = tten1d(k)/pi3d(i,k,j)
-            tten1d(k) = hrc(ncol,k)/86400.
+            tten1d(k) = hrc_p(bcol,k)/86400.
             rthratenlwc(i,k,j) = tten1d(k)/pi3d(i,k,j)
          enddo
 
 !
-      end do i_loop
-   end do j_loop
+      end do pack_loop
+   end do batch_loop
    
-! gpu: free packed batch
-   DEALLOCATE( play_p )
+! gpu: free the solver batch
+   DEALLOCATE( play_p, tlay_p, plev_p, tlev_p, tsfc_p,                         &
+               h2ovmr_p, o3vmr_p, co2vmr_p, o2vmr_p, ch4vmr_p, n2ovmr_p,       &
+               cfc11vmr_p, cfc12vmr_p, cfc22vmr_p, ccl4vmr_p, emis_p,          &
+               cldfmcl_p, taucmcl_p, ciwpmcl_p, clwpmcl_p, cswpmcl_p,          &
+               reicmcl_p, relqmcl_p, resnmcl_p, tauaer_p,                      &
+               uflx_p, dflx_p, uflxc_p, dflxc_p, uflxcln_p, dflxcln_p,         &
+               hr_p, hrc_p )
 
 !-------------------------------------------------------------------
 
