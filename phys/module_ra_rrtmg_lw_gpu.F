@@ -390,9 +390,21 @@ CONTAINS
                   266.13,263.96,261.54,258.93,256.15,253.23,      &
                   249.89,246.67,243.48,240.25,236.66,233.86/    
 
+! gpu: kernel launcher
+   INTERFACE
+      SUBROUTINE wrf_gpu_lw(x, n) BIND(C, name="wrf_gpu_lw")
+         USE iso_c_binding, ONLY : c_float, c_int
+         REAL(c_float)    :: x(*)
+         INTEGER(c_int)   :: n
+      END SUBROUTINE
+   END INTERFACE
+
 ! gpu: batching parameters
    INTEGER, PARAMETER :: batch_size = 512  ! max columns per solver batch (= GPU launch width)
    INTEGER :: nx, ny, ncols, batch_start, nbatch, bcol
+! gpu: dump harness (env WRF_GPU_DUMP=1 -> write one full batch of rrtmg_lw in/out)
+   LOGICAL, SAVE :: gpu_dumped = .false.
+   CHARACTER(LEN=32) :: gpu_dump_env
    INTEGER :: i_of(batch_size), j_of(batch_size)      ! bcol -> (i,j) mapping for batching
 ! gpu: batched rrtmg_lw inputs
    REAL, ALLOCATABLE, DIMENSION(:,:)   :: play_p, tlay_p,                       & ! (batch, nlay)
@@ -1318,7 +1330,39 @@ CONTAINS
 
       end do pack_loop
 
+! gpu: dump harness - write one full batch's rrtmg_lw inputs (before solve) and
+! outputs (after solve) to raw stream-binary files, once, on the monitor rank.
+! Gated by env WRF_GPU_DUMP=1. Serialised across OpenMP threads; nbatch==batch_size
+! guarantees a full batch. Array order below matches the rrtmg_lw arg list.
+      CALL get_environment_variable('WRF_GPU_DUMP', gpu_dump_env)
+!$OMP CRITICAL (gpu_dump)
+      IF ( gpu_dump_env == '1' .and. .not. gpu_dumped                          &
+           .and. wrf_dm_on_monitor() .and. nbatch == batch_size ) THEN
+
+         OPEN(unit=91, file='gpu_dump_in.bin', form='unformatted', access='stream', status='replace')
+! header: dims + scalar solver flags the harness needs to size arrays / branch
+         WRITE(91) nbatch, nlay, nlayers, nbndlw, ngptlw, icld, inflglw, iceflglw, liqflglw
+         WRITE(91) play_p(1:nbatch,:), plev_p(1:nbatch,:)
+         WRITE(91) tlay_p(1:nbatch,:), tlev_p(1:nbatch,:)
+         WRITE(91) tsfc_p(1:nbatch)
+         WRITE(91) h2ovmr_p(1:nbatch,:), o3vmr_p(1:nbatch,:)
+         WRITE(91) co2vmr_p(1:nbatch,:), ch4vmr_p(1:nbatch,:)
+         WRITE(91) n2ovmr_p(1:nbatch,:), o2vmr_p(1:nbatch,:)
+         WRITE(91) cfc11vmr_p(1:nbatch,:), cfc12vmr_p(1:nbatch,:)
+         WRITE(91) cfc22vmr_p(1:nbatch,:), ccl4vmr_p(1:nbatch,:)
+         WRITE(91) emis_p(1:nbatch,:)
+         WRITE(91) cldfmcl_p(:,1:nbatch,:)
+         WRITE(91) taucmcl_p(:,1:nbatch,:), ciwpmcl_p(:,1:nbatch,:)
+         WRITE(91) clwpmcl_p(:,1:nbatch,:), cswpmcl_p(:,1:nbatch,:)
+         WRITE(91) reicmcl_p(1:nbatch,:), relqmcl_p(1:nbatch,:), resnmcl_p(1:nbatch,:)
+         WRITE(91) tauaer_p(1:nbatch,:,:)
+         CLOSE(91)
+      ENDIF
+!$OMP END CRITICAL (gpu_dump)
+
 ! gpu: solve phase - one single GPU launch over the batch (TODO)
+      ! call wrf_gpu_lw( play_p, SIZE(play_p) )
+
       solve_loop: do bcol = 1, nbatch
 
 ! Call RRTMG longwave radiation model (into packed arrays)
@@ -1348,6 +1392,23 @@ CONTAINS
              calc_clean_atm_diag )
 
       end do solve_loop
+
+! gpu: dump harness - outputs of the same batch, right after solve. gpu_dumped
+! set here so the in/out files always come from one consistent batch.
+!$OMP CRITICAL (gpu_dump)
+      IF ( gpu_dump_env == '1' .and. .not. gpu_dumped                          &
+           .and. wrf_dm_on_monitor() .and. nbatch == batch_size ) THEN
+
+         OPEN(unit=92, file='gpu_dump_out.bin', form='unformatted', access='stream', status='replace')
+         WRITE(92) uflx_p(1:nbatch,:), dflx_p(1:nbatch,:)
+         WRITE(92) uflxc_p(1:nbatch,:), dflxc_p(1:nbatch,:)
+         WRITE(92) uflxcln_p(1:nbatch,:), dflxcln_p(1:nbatch,:)
+         WRITE(92) hr_p(1:nbatch,:), hrc_p(1:nbatch,:)
+         CLOSE(92)
+         gpu_dumped = .true.
+         CALL wrf_message('gpu: dumped rrtmg_lw batch to gpu_dump_{in,out}.bin')
+      ENDIF
+!$OMP END CRITICAL (gpu_dump)
 
 ! gpu: unpack phase - scatter the batch outputs into the WRF arrays
       unpack_loop: do bcol = 1, nbatch
