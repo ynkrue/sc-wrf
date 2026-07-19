@@ -422,7 +422,7 @@ NOAHMP_MODULES = \
         noahmp/src/SurfaceRadiationGlacierMod.o \
         noahmp/src/WaterMainGlacierMod.o
 
-OBJS    = rrtmg_lw_gpu_kernels.o
+OBJS    = rrtmg_lw_gpu_kernels.o rrtmg_lw_gpu_tables.o
 
 LIBTARGET    =  physics
 TARGETDIR    =  ./

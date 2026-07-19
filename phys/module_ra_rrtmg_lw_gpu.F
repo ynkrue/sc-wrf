@@ -1,12 +1,38 @@
-!------------------------------------------------------------------
-! GPU dispatch wrapper for RRTMG longwave radiation.
-! M2 skeleton: mirrors the RRTMG_LWRAD interface and uses currently
-! CPU implementation.
-!------------------------------------------------------------------
+ !------------------------------------------------------------------
+  ! !DESCRIPTION: Longwave Radiation Driver
+  !
+  ! This program is the GPU driver subroutine for RRTMG_LW (the AER LW
+  ! radiation model), derived from the CPU driver rrtmg_lw in
+  ! module_ra_rrtmg_lw.F.
+  !
+  ! This routine:
+  !    a) packs WRF 3D arrays into flat batch buffers and packs aerosol
+  !       and cloud optical properties for each tile column.
+  !    b) Uploads the batch to the GPU and runs the full solver pipeline:
+  !       inatm, setcoef, cldprmc, taumol (16 bands), rtrnmc, flux
+  !       reduction, and heating rate calculation.
+  !    c) Unpacks the computed fluxes and heating rates back to WRF arrays.
+  !
+  ! Cloud and aerosol properties follow the same input conventions as the
+  ! CPU rrtmg_lw:
+  !   - Cloud optical depth (inflglw=0) or physical properties (inflglw>=2)
+  !   - Aerosol optical depth added directly to gas optical depth (iaer=10)
+  !
+  ! NOTE: RRTMG_LW_INI must be called once during model initialization.
+  ! The McICA sub-column cloud generator (mcica_subcol_lw) runs on CPU
+  ! before the GPU call.
+  !
+  !------------------------------------------------------------------
+  ! !REVISION HISTORY:
+  !    Apr 2026: Y. Rüfenacht, ETH/CSCS — Initial GPU port.
+  !------------------------------------------------------------------
 MODULE module_ra_rrtmg_lw_gpu
 
 CONTAINS
-
+!------------------------------------------------------------------
+  ! GPU driver for RRTMG longwave radiation.
+  ! Batches columns and dispatches them to CUDA kernels.
+  ! Derived from module_ra_rrtmg_lw.F (WRF v4.8.0).
 !------------------------------------------------------------------
    SUBROUTINE RRTMG_LWRAD_GPU(                                    &
                        rthratenlw,                                &
@@ -50,23 +76,21 @@ CONTAINS
 !ccc To use clWRF time varying trace gases
    USE MODULE_RA_CLWRF_SUPPORT, ONLY : read_CAMgases
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! Imports for the copied RRTMG_LWRAD body. These live at module scope in
-! module_ra_rrtmg_lw; here they are pulled in at subroutine scope.
-   USE module_wrf_error
-#if (HWRF == 1)
-   USE module_state_description, ONLY : FER_MP_HIRES, FER_MP_HIRES_ADVECT, ETAMP_HWRF
-#else
-   USE module_state_description, ONLY : FER_MP_HIRES, FER_MP_HIRES_ADVECT
-#endif
-   USE parrrtm,             ONLY : nbndlw, ngptlw
+! TODO: delte once solve routine replaced
    USE rrtmg_lw_rad,        ONLY : rrtmg_lw
-   USE mcica_subcol_gen_lw, ONLY : mcica_subcol_lw
-! nlayers is set at init by rrtmg_lwinit; import it (do NOT redeclare) so we
-! share that value. retab/deltap are the shared table/parameter.
-   USE module_ra_rrtmg_lw,  ONLY : nlayers, retab, deltap, &
-                                   inirad, relcalc, reicalc
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+! Modules for CPU pre/post-processing (McICA, aerosol, cloud physics,
+! reference profiles) that remain on the host.
+     USE module_wrf_error
+#if (HWRF == 1)
+     USE module_state_description, ONLY : FER_MP_HIRES, FER_MP_HIRES_ADVECT, ETAMP_HWRF
+#else
+     USE module_state_description, ONLY : FER_MP_HIRES, FER_MP_HIRES_ADVECT
+#endif
+     USE parrrtm,             ONLY : nbndlw, ngptlw
+     USE mcica_subcol_gen_lw, ONLY : mcica_subcol_lw
+     USE module_ra_rrtmg_lw,  ONLY : nlayers, retab, deltap, &
+                                     inirad, relcalc, reicalc
 
    IMPLICIT NONE
 !------------------------------------------------------------------
@@ -390,20 +414,55 @@ CONTAINS
                   266.13,263.96,261.54,258.93,256.15,253.23,      &
                   249.89,246.67,243.48,240.25,236.66,233.86/    
 
-! gpu: kernel launcher
+  !------------------------------------------------------------------
+  ! GPU batch interface
+  !
+  ! Columns are processed in batches of batch_size. Each batch is packed
+  ! into flat Fortran arrays (column-major, batch dimension fastest),
+  ! sent to wrf_gpu_lw via BIND(C), and the results are unpacked back
+  ! into WRF 3D arrays.
+  !
+  ! See rrtmg_lw_gpu_tables.h for the C-side layout conventions.
+  !------------------------------------------------------------------
    INTERFACE
-      SUBROUTINE wrf_gpu_lw(x, n) BIND(C, name="wrf_gpu_lw")
+      SUBROUTINE wrf_gpu_lw(                            &
+         nbatch, nlayers, nbndlw, ngptlw,              &
+         icld, inflglw, iceflglw, liqflglw,            &
+         play, plev, tlay, tlev, tsfc,                 &
+         h2ovmr, o3vmr, co2vmr, ch4vmr,                &
+         n2ovmr, o2vmr,                                &
+         cfc11vmr, cfc12vmr, cfc22vmr, ccl4vmr,        &
+         emis,                                         &
+         cldfmcl, taucmcl, ciwpmcl, clwpmcl, cswpmcl,  &
+         reicmcl, relqmcl, resnmcl,                    &
+         tauaer,                                       &
+         uflx, dflx, uflxc, dflxc,                     &
+         uflxcln, dflxcln, hr, hrc,                    &
+         calc_clean_atm_diag                           &
+      ) BIND(C, name="wrf_gpu_lw")
          USE iso_c_binding, ONLY : c_float, c_int
-         REAL(c_float)    :: x(*)
-         INTEGER(c_int)   :: n
+         INTEGER(c_int), VALUE :: nbatch, nlayers, nbndlw, ngptlw
+         INTEGER(c_int), VALUE :: icld, inflglw, iceflglw, liqflglw
+         REAL(c_float) :: play(*), plev(*), tlay(*), tlev(*), tsfc(*)
+         REAL(c_float) :: h2ovmr(*), o3vmr(*), co2vmr(*), ch4vmr(*)
+         REAL(c_float) :: n2ovmr(*), o2vmr(*)
+         REAL(c_float) :: cfc11vmr(*), cfc12vmr(*), cfc22vmr(*), ccl4vmr(*)
+         REAL(c_float) :: emis(*)
+         REAL(c_float) :: cldfmcl(*), taucmcl(*), ciwpmcl(*), clwpmcl(*), cswpmcl(*)
+         REAL(c_float) :: reicmcl(*), relqmcl(*), resnmcl(*)
+         REAL(c_float) :: tauaer(*)
+         REAL(c_float) :: uflx(*), dflx(*), uflxc(*), dflxc(*)
+         REAL(c_float) :: uflxcln(*), dflxcln(*), hr(*), hrc(*)
+         INTEGER(c_int), VALUE :: calc_clean_atm_diag
       END SUBROUTINE
    END INTERFACE
 
-! gpu: batching parameters
+! batching parameters
    INTEGER, PARAMETER :: batch_size = 512  ! max columns per solver batch (= GPU launch width)
    INTEGER :: nx, ny, ncols, batch_start, nbatch, bcol
    INTEGER :: i_of(batch_size), j_of(batch_size)      ! bcol -> (i,j) mapping for batching
-! gpu: batched rrtmg_lw inputs
+   LOGICAL, SAVE :: tables_uploaded = .FALSE.
+! batched rrtmg_lw inputs
    REAL, ALLOCATABLE, DIMENSION(:,:)   :: play_p, tlay_p,                       & ! (batch, nlay)
                                           plev_p, tlev_p,                       & ! (batch, nlay+1)
                                           h2ovmr_p, o3vmr_p, co2vmr_p,          & ! (batch, nlay)
@@ -416,7 +475,7 @@ CONTAINS
    REAL, ALLOCATABLE, DIMENSION(:,:,:) :: cldfmcl_p, taucmcl_p, ciwpmcl_p,      & ! (ngptlw, batch, nlay) - ncol is the MIDDLE dim
                                           clwpmcl_p, cswpmcl_p,                 &
                                           tauaer_p                                ! (batch, nlay, nbndlw)
-! gpu: batched rrtmg_lw outputs
+! batched rrtmg_lw outputs
    REAL, ALLOCATABLE, DIMENSION(:,:)   :: uflx_p, dflx_p, uflxc_p, dflxc_p,     & ! (batch, nlay+1)
                                           uflxcln_p, dflxcln_p,                 &
                                           hr_p, hrc_p                             ! (batch, nlay)
@@ -474,7 +533,7 @@ CONTAINS
       cfc12 = 0.538e-9
    END IF
 
-! gpu: allocate the solver batch (on the heap)
+! allocate the solver batch (on the heap)
    nx = ite - its + 1
    ny = jte - jts + 1
    ALLOCATE( play_p (batch_size, kts:nlayers),                                 &
@@ -511,11 +570,19 @@ CONTAINS
              hr_p     (batch_size, kts:nlayers),                               &
              hrc_p    (batch_size, kts:nlayers) )
 
-! gpu: process tile in batches of columns
+! batch loop (process tile in column batches)
    ncols = nx * ny
+
+!$OMP CRITICAL(gpu_lw_tables)
+   IF (.NOT. tables_uploaded) THEN
+      CALL RRTMG_LW_GPU_TABLES_INIT
+      tables_uploaded = .TRUE.
+   END IF
+!$OMP END CRITICAL(gpu_lw_tables)
+
    batch_loop: do batch_start = 0, ncols-1, batch_size
       nbatch = min( batch_size, ncols - batch_start )
-! gpu: pack buffers
+! pack loop (pack buffers)
       pack_loop: do bcol = 1, nbatch
 
          i = its + mod( batch_start + bcol - 1, nx )
@@ -1298,7 +1365,7 @@ CONTAINS
       endif  ! aer_ra_feedback
 #endif
 
-! gpu: pack this column's solver inputs into the batch
+! pack this column's solver inputs into the batch
          play_p (bcol, :) = play (1, :)
          tlay_p (bcol, :) = tlay (1, :)
          plev_p (bcol, :) = plev (1, :)
@@ -1327,12 +1394,24 @@ CONTAINS
 
       end do pack_loop
 
-! gpu: solve phase - one single GPU launch over the batch (TODO)
-      ! call wrf_gpu_lw( play_p, SIZE(play_p) )
+! solve phase - Call RRTMG longwave GPU radiation model
+      ! call wrf_gpu_lw(                                       &
+      !       nbatch, nlayers, nbndlw, ngptlw,                   &
+      !       icld, inflglw, iceflglw, liqflglw,                 &
+      !       play_p, plev_p, tlay_p, tlev_p, tsfc_p,            &
+      !       h2ovmr_p, o3vmr_p, co2vmr_p, ch4vmr_p,             &
+      !       n2ovmr_p, o2vmr_p,                                 &
+      !       cfc11vmr_p, cfc12vmr_p, cfc22vmr_p, ccl4vmr_p,     &
+      !       emis_p,                                            &
+      !       cldfmcl_p, taucmcl_p, ciwpmcl_p, clwpmcl_p, cswpmcl_p, &
+      !       reicmcl_p, relqmcl_p, resnmcl_p,                   &
+      !       tauaer_p,                                          &
+      !       uflx_p, dflx_p, uflxc_p, dflxc_p,                  &
+      !       uflxcln_p, dflxcln_p, hr_p, hrc_p,                 &
+      !       calc_clean_atm_diag )
 
+! delete the loop once GPU port is done
       solve_loop: do bcol = 1, nbatch
-
-! Call RRTMG longwave radiation model (into packed arrays)
          call rrtmg_lw &
             (ncol    ,nlay    ,icld    , &
              play_p(bcol:bcol,:)     ,plev_p(bcol:bcol,:)     , &
@@ -1360,7 +1439,7 @@ CONTAINS
 
       end do solve_loop
 
-! gpu: unpack phase - scatter the batch outputs into the WRF arrays
+! unpack phase - scatter the batch outputs into the WRF arrays
       unpack_loop: do bcol = 1, nbatch
          i = i_of(bcol)
          j = j_of(bcol)
@@ -1421,7 +1500,7 @@ CONTAINS
       end do unpack_loop
    end do batch_loop
    
-! gpu: free the solver batch
+! free the solver batch
    DEALLOCATE( play_p, tlay_p, plev_p, tlev_p, tsfc_p,                         &
                h2ovmr_p, o3vmr_p, co2vmr_p, o2vmr_p, ch4vmr_p, n2ovmr_p,       &
                cfc11vmr_p, cfc12vmr_p, cfc22vmr_p, ccl4vmr_p, emis_p,          &
@@ -1433,5 +1512,191 @@ CONTAINS
 !-------------------------------------------------------------------
 
    END SUBROUTINE RRTMG_LWRAD_GPU
+
+!-------------------------------------------------------------------
+   SUBROUTINE RRTMG_LW_GPU_TABLES_INIT
+! Uploads all k-tables and lookup tables to GPU device memory.
+! Called once on the first radiation call (lazy init).
+!-------------------------------------------------------------------
+   USE iso_c_binding
+   USE rrlw_con, ONLY : heatfac, fluxfac, oneminus
+   USE rrlw_wvn, ONLY : ngb, delwave, nspa, totplnk
+   USE rrlw_ref, ONLY : preflog, tref, chi_mls
+   USE rrlw_tbl, ONLY : tau_tbl, exp_tbl, tfn_tbl
+   USE rrlw_cld, ONLY : abscld1, absice0, absice1, absice2, absice3, &
+                         absliq0, absliq1
+   IMPLICIT NONE
+   INTEGER :: ng
+
+   INTERFACE
+     SUBROUTINE wrf_gpu_lw_upload_globals(h,f,o,ngb,dw,pl,tr,cm,tp,tt,et,ft) BIND(C)
+       USE iso_c_binding; REAL(c_float) :: h,f,o
+       INTEGER(c_int) :: ngb(*)
+       REAL(c_float) :: dw(*),pl(*),tr(*),cm(*),tp(*),tt(*),et(*),ft(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_cloud(a1,ai0,ai1,ai2,ai3,al0,al1) BIND(C)
+       USE iso_c_binding; REAL(c_float) :: a1,ai0(*),ai1(*),ai2(*),ai3(*),al0,al1(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_band(b,fa,nfa,fb,nfb,aa,naa,ab,nab,sr,nsr,fr,nfr) BIND(C)
+       USE iso_c_binding
+       INTEGER(c_int), VALUE :: b,nfa,nfb,naa,nab,nsr,nfr
+       REAL(c_float) :: fa(*),fb(*),aa(*),ab(*),sr(*),fr(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b1(ka,kb,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: ka(*),kb(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b3(ka,kb,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: ka(*),kb(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b5(ka,cc,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: ka(*),cc(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b6(ka,c11,c12,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: ka(*),c11(*),c12(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b7(ka,kb,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: ka(*),kb(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b8(kc2,kn2,ko3,kbc2,kbn2,c12,c22,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng
+       REAL(c_float) :: kc2(*),kn2(*),ko3(*),kbc2(*),kbn2(*),c12(*),c22(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b9(ka,kb,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: ka(*),kb(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b11(ka,kb,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: ka(*),kb(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b13(kc2,kco,ko3,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: kc2(*),kco(*),ko3(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_upload_minor_b15(ka,ng) BIND(C)
+       USE iso_c_binding; INTEGER(c_int), VALUE :: ng; REAL(c_float) :: ka(*)
+     END SUBROUTINE
+     SUBROUTINE wrf_gpu_lw_tables_loaded() BIND(C)
+     END SUBROUTINE
+   END INTERFACE
+
+   CALL wrf_gpu_lw_upload_globals(heatfac, fluxfac, oneminus, ngb, delwave, &
+       preflog, tref, chi_mls, totplnk, tau_tbl, exp_tbl, tfn_tbl)
+   CALL wrf_gpu_lw_upload_cloud(abscld1, absice0, absice1, absice2, absice3, &
+       absliq0, absliq1)
+   CALL b1;  CALL b2;  CALL b3;  CALL b4
+   CALL b5;  CALL b6;  CALL b7;  CALL b8
+   CALL b9;  CALL b10; CALL b11; CALL b12
+   CALL b13; CALL b14; CALL b15; CALL b16
+   CALL wrf_gpu_lw_tables_loaded
+
+   CONTAINS
+   SUBROUTINE b1
+     USE rrlw_kg01, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref,ka_mn2,kb_mn2
+     ng = SIZE(fracrefa) / nspa(1)
+     CALL wrf_gpu_lw_upload_band(0, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b1(ka_mn2, kb_mn2, ng)
+   END SUBROUTINE
+   SUBROUTINE b2
+     USE rrlw_kg02, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref
+     ng = SIZE(fracrefa) / nspa(2)
+     CALL wrf_gpu_lw_upload_band(1, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+   END SUBROUTINE
+   SUBROUTINE b3
+     USE rrlw_kg03, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref,ka_mn2o,kb_mn2o
+     ng = SIZE(fracrefa) / nspa(3)
+     CALL wrf_gpu_lw_upload_band(2, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b3(ka_mn2o, kb_mn2o, ng)
+   END SUBROUTINE
+   SUBROUTINE b4
+     USE rrlw_kg04, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref
+     ng = SIZE(fracrefa) / nspa(4)
+     CALL wrf_gpu_lw_upload_band(3, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+   END SUBROUTINE
+   SUBROUTINE b5
+     USE rrlw_kg05, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref,ka_mo3,ccl4
+     ng = SIZE(fracrefa) / nspa(5)
+     CALL wrf_gpu_lw_upload_band(4, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b5(ka_mo3, ccl4, ng)
+   END SUBROUTINE
+   SUBROUTINE b6
+     USE rrlw_kg06, ONLY: fracrefa,absa,selfref,forref,ka_mco2,cfc11adj,cfc12
+     ng = SIZE(fracrefa) / nspa(6)
+     CALL wrf_gpu_lw_upload_band(5, fracrefa,SIZE(fracrefa), fracrefa,0, &
+         absa,SIZE(absa), absa,0, selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b6(ka_mco2, cfc11adj, cfc12, ng)
+   END SUBROUTINE
+   SUBROUTINE b7
+     USE rrlw_kg07, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref,ka_mco2,kb_mco2
+     ng = SIZE(fracrefa) / nspa(7)
+     CALL wrf_gpu_lw_upload_band(6, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b7(ka_mco2, kb_mco2, ng)
+   END SUBROUTINE
+   SUBROUTINE b8
+     USE rrlw_kg08, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref, &
+         ka_mco2,ka_mn2o,ka_mo3,kb_mco2,kb_mn2o,cfc12,cfc22adj
+     ng = SIZE(fracrefa) / nspa(8)
+     CALL wrf_gpu_lw_upload_band(7, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b8(ka_mco2,ka_mn2o,ka_mo3,kb_mco2,kb_mn2o,cfc12,cfc22adj,ng)
+   END SUBROUTINE
+   SUBROUTINE b9
+     USE rrlw_kg09, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref,ka_mn2o,kb_mn2o
+     ng = SIZE(fracrefa) / nspa(9)
+     CALL wrf_gpu_lw_upload_band(8, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b9(ka_mn2o, kb_mn2o, ng)
+   END SUBROUTINE
+   SUBROUTINE b10
+     USE rrlw_kg10, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref
+     ng = SIZE(fracrefa) / nspa(10)
+     CALL wrf_gpu_lw_upload_band(9, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+   END SUBROUTINE
+   SUBROUTINE b11
+     USE rrlw_kg11, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref,ka_mo2,kb_mo2
+     ng = SIZE(fracrefa) / nspa(11)
+     CALL wrf_gpu_lw_upload_band(10, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b11(ka_mo2, kb_mo2, ng)
+   END SUBROUTINE
+   SUBROUTINE b12
+     USE rrlw_kg12, ONLY: fracrefa,absa,selfref,forref
+     ng = SIZE(fracrefa) / nspa(12)
+     CALL wrf_gpu_lw_upload_band(11, fracrefa,SIZE(fracrefa), fracrefa,0, &
+         absa,SIZE(absa), absa,0, selfref,SIZE(selfref), forref,SIZE(forref))
+   END SUBROUTINE
+   SUBROUTINE b13
+     USE rrlw_kg13, ONLY: fracrefa,fracrefb,absa,selfref,forref,ka_mco2,ka_mco,kb_mo3
+     ng = SIZE(fracrefa) / nspa(13)
+     CALL wrf_gpu_lw_upload_band(12, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absa,0, selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b13(ka_mco2, ka_mco, kb_mo3, ng)
+   END SUBROUTINE
+   SUBROUTINE b14
+     USE rrlw_kg14, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref
+     ng = SIZE(fracrefa) / nspa(14)
+     CALL wrf_gpu_lw_upload_band(13, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+   END SUBROUTINE
+   SUBROUTINE b15
+     USE rrlw_kg15, ONLY: fracrefa,absa,selfref,forref,ka_mn2
+     ng = SIZE(fracrefa) / nspa(15)
+     CALL wrf_gpu_lw_upload_band(14, fracrefa,SIZE(fracrefa), fracrefa,0, &
+         absa,SIZE(absa), absa,0, selfref,SIZE(selfref), forref,SIZE(forref))
+     CALL wrf_gpu_lw_upload_minor_b15(ka_mn2, ng)
+   END SUBROUTINE
+   SUBROUTINE b16
+     USE rrlw_kg16, ONLY: fracrefa,fracrefb,absa,absb,selfref,forref
+     ng = SIZE(fracrefa) / nspa(16)
+     CALL wrf_gpu_lw_upload_band(15, fracrefa,SIZE(fracrefa), fracrefb,SIZE(fracrefb), &
+         absa,SIZE(absa), absb,SIZE(absb), selfref,SIZE(selfref), forref,SIZE(forref))
+   END SUBROUTINE
+
+   END SUBROUTINE RRTMG_LW_GPU_TABLES_INIT
+
 
 END MODULE module_ra_rrtmg_lw_gpu

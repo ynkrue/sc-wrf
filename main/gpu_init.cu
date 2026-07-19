@@ -5,7 +5,7 @@ int gpu_device_id() {
         int ndev = 0;
         if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev <= 0) {
             fprintf(stderr, "wrf_gpu: no CUDA devices visible\n");
-            MPI_Abort(MPI_COMM_WORLD, 1);
+            exit(1);
             return -1;
         }
         const char *s = getenv("SLURM_LOCALID");

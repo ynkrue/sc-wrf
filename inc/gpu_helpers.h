@@ -5,7 +5,6 @@
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
-#include <mpi.h>
 
 #define CUDA_CHECK(call)                                                    \
     do {                                                                    \
@@ -13,7 +12,7 @@
         if (err__ != cudaSuccess) {                                         \
             fprintf(stderr, "CUDA error %s:%d: %s\n",                       \
                     __FILE__, __LINE__, cudaGetErrorString(err__));         \
-            MPI_Abort(MPI_COMM_WORLD, 1);                                   \
+            exit(1);                                                        \
         }                                                                   \
     } while (0)
 
