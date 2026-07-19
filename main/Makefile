@@ -6,9 +6,9 @@ RM      =       rm -f
 
 MODULES =  module_wrf_top.F
 
-OBJS    =
+OBJS    = gpu_init.o
 
-LIBPATHS = 
+LIBPATHS =
 
 include ../configure.wrf
 

@@ -119,6 +119,8 @@ MODULE module_wrf_top
      
      SUBROUTINE wrf_dfi_array_reset ( )
      END SUBROUTINE wrf_dfi_array_reset
+	     SUBROUTINE wrf_gpu_init ( )
+	     END SUBROUTINE wrf_gpu_init
 ! #endif
 
      SUBROUTINE med_nest_initial ( parent , grid , config_flags )
@@ -187,6 +189,8 @@ CONTAINS
    ENDIF
    ! Phase 2 resumes after MPI_INIT() (if it is called)
    CALL init_modules(2)
+   ! Initialize GPU device for this MPI rank
+   CALL wrf_gpu_init()
 
 !<DESCRIPTION>
 ! The wrf namelist.input file is read and stored in the USE associated
